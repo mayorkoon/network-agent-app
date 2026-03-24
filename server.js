@@ -241,7 +241,8 @@ app.get('/oauth/start', async (req, res) => {
   if (!process.env.GMAIL_CLIENT_ID) return res.status(400).send('Set GMAIL_CLIENT_ID in .env first');
   try {
     const { google } = await import('googleapis');
-    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    //const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, process.env.GMAIL_REDIRECT_URI);
     res.redirect(auth.generateAuthUrl({ access_type: 'offline', scope: ['https://www.googleapis.com/auth/gmail.readonly'], prompt: 'consent' }));
   } catch (err) { res.status(500).send(err.message); }
 });
@@ -252,7 +253,8 @@ app.get('/oauth/callback', async (req, res) => {
   if (!code)  return res.status(400).send('No code received');
   try {
     const { google } = await import('googleapis');
-    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    //const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, process.env.GMAIL_REDIRECT_URI);
     const { tokens } = await auth.getToken(code);
     fs.writeFileSync(path.join(process.cwd(), '.token-gmail.json'), JSON.stringify(tokens, null, 2));
     res.send(`<html><body style="font-family:monospace;background:#07080d;color:#22d3a3;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">✅</div><div style="font-size:18px">Gmail authorized. Close this tab.</div><script>setTimeout(()=>window.close(),2000)<\/script></div></body></html>`);
