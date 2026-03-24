@@ -1,0 +1,19 @@
+# Environment variables
+.env
+.env.development
+.env.production
+
+# Dependencies
+node_modules/
+
+# Build
+build/
+
+# Logs
+*.log
+
+# Mac
+.DS_Store
+
+.gmail-index.json
+.token-index.json
