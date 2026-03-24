@@ -1,0 +1,30 @@
+{
+  "name": "linkedin-network-agent",
+  "version": "3.0.0",
+  "description": "LinkedIn Network Intelligence — web dashboard with Gmail, WhatsApp, LinkedIn, Twitter scoring",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start":      "node server.js",
+    "dev":        "node --watch server.js",
+    "auth-gmail": "node agent.js auth-gmail",
+    "import":     "node agent.js import",
+    "score":      "node agent.js score",
+    "enrich":     "node agent.js enrich-linkedin",
+    "dormant":    "node agent.js dormant"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "airtable":       "^0.12.2",
+    "chalk":          "^5.3.0",
+    "csv-parse":      "^5.5.3",
+    "dotenv":         "^16.3.1",
+    "express":        "^4.18.2",
+    "googleapis":     "^128.0.0",
+    "multer":         "^1.4.5-lts.1",
+    "playwright":     "^1.42.0",
+    "twitter-api-v2": "^1.17.0"
+  }
+}
