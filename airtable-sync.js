@@ -1,180 +1,240 @@
 /**
- * airtable-sync.js
- * Airtable operations — upsert profiles and write relationship scores.
+ * airtable-sync.js — ES Module
+ * Exports exactly what server.js expects:
+ *   bulkUpsertProfiles, loadAllContacts, bulkWriteScores,
+ *   loadContactsByStatus, getDormantContacts
  */
 
 import Airtable from 'airtable';
 
-let _table = null;
-const DELAY_MS = 220; // stay under Airtable's 5 req/sec limit
+const TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Contacts';
 
 function getTable() {
-  if (_table) return _table;
-  Airtable.configure({ apiKey: process.env.AIRTABLE_API_KEY });
-  _table = new Airtable()
-    .base(process.env.AIRTABLE_BASE_ID)(process.env.AIRTABLE_TABLE_NAME || 'Contacts');
-  return _table;
+  const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+  return base(TABLE_NAME);
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// ─── Field mappers ────────────────────────────────────────────────────────────
-
-function profileToFields(p) {
-  const f = {};
-  if (p.name)           f['Name']           = p.name;
-  if (p.title)          f['Title']          = p.title;
-  if (p.company)        f['Company']        = p.company;
-  if (p.location)       f['Location']       = p.location;
-  if (p.linkedin_url)   f['LinkedIn URL']   = p.linkedin_url;
-  if (p.email)          f['Email']          = p.email;
-  if (p.connected_date) f['Connected Date'] = p.connected_date;
-  f['Source']        = p._source || 'CSV';
-  f['Last Enriched'] = new Date().toISOString().split('T')[0];
-  return f;
+function normKey(name) {
+  return (name || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function scoreToFields(s) {
-  const f = {};
-  if (s.compositeScore   != null) f['Relationship Score']       = s.compositeScore;
-  if (s.status)                   f['Relationship Status']      = s.status;
-  if (s.latestContactDate)        f['Last Contact Date']        = s.latestContactDate;
-  if (s.daysSinceContact != null) f['Days Since Contact']       = s.daysSinceContact;
-  if (s.flagForReengagement != null) f['Flag for Re-engagement'] = s.flagForReengagement;
-  if (s.activePlatforms?.length)  f['Active Platforms']         = s.activePlatforms.join(', ');
-
-  const bd = s.platformBreakdown || {};
-
-  if (bd.gmail) {
-    if (bd.gmail.interactionCount != null) f['Gmail Thread Count'] = bd.gmail.interactionCount;
-    if (bd.gmail.latestDate) f['Gmail Last Email'] = new Date(bd.gmail.latestDate).toISOString().split('T')[0];
-  }
-  if (bd.whatsapp) {
-    if (bd.whatsapp.interactionCount != null) f['WhatsApp Message Count'] = bd.whatsapp.interactionCount;
-    if (bd.whatsapp.latestDate) f['WhatsApp Last Message'] = new Date(bd.whatsapp.latestDate).toISOString().split('T')[0];
-  }
-  if (bd.linkedin) {
-    if (bd.linkedin.interactionCount != null) f['LinkedIn Message Count'] = bd.linkedin.interactionCount;
-    if (bd.linkedin.latestDate) f['LinkedIn Last Message'] = new Date(bd.linkedin.latestDate).toISOString().split('T')[0];
-  }
-  if (bd.twitter) {
-    if (bd.twitter.interactionCount != null) f['Twitter Interaction Count'] = bd.twitter.interactionCount;
-  }
-
-  return f;
-}
-
-// ─── Record lookup ────────────────────────────────────────────────────────────
-
-async function findRecord(name, email, linkedinUrl) {
-  const conditions = [];
-  if (linkedinUrl) conditions.push(`{LinkedIn URL} = "${linkedinUrl}"`);
-  if (email)       conditions.push(`{Email} = "${email}"`);
-  if (name)        conditions.push(`{Name} = "${name}"`);
-  if (!conditions.length) return null;
-
-  const formula = conditions.length > 1 ? `OR(${conditions.join(', ')})` : conditions[0];
-  const records = await getTable().select({ filterByFormula: formula, maxRecords: 1 }).firstPage();
-  return records[0] || null;
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-export async function upsertProfile(profile) {
-  const table = getTable();
-  const fields = profileToFields(profile);
-  if (!fields['Name']) return { action: 'skipped' };
-
-  try {
-    const existing = await findRecord(fields['Name'], fields['Email'], fields['LinkedIn URL']);
-    if (existing) {
-      const updates = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && v !== ''));
-      await table.update(existing.id, updates);
-      return { action: 'updated', name: fields['Name'] };
-    }
-    await table.create(fields);
-    return { action: 'created', name: fields['Name'] };
-  } catch (err) {
-    return { action: 'error', name: fields['Name'], error: err.message };
-  }
-}
-
+// ─── bulkUpsertProfiles ───────────────────────────────────────────────────────
+// Called by server.js /api/import
 export async function bulkUpsertProfiles(profiles, { onProgress } = {}) {
-  const totals = { created: 0, updated: 0, skipped: 0, errors: [] };
-  for (let i = 0; i < profiles.length; i++) {
-    const r = await upsertProfile(profiles[i]);
-    if (r.action === 'created')  totals.created++;
-    else if (r.action === 'updated') totals.updated++;
-    else if (r.action === 'skipped') totals.skipped++;
-    else totals.errors.push(r);
-    if (onProgress) onProgress({ index: i + 1, total: profiles.length, result: r });
-    if (i < profiles.length - 1) await sleep(DELAY_MS);
-  }
-  return totals;
-}
+  const table  = getTable();
+  const result = { created: 0, updated: 0, skipped: 0, errors: [] };
 
-export async function writeScore(score) {
-  const fields = scoreToFields(score);
-  try {
-    const existing = await findRecord(score.name, score.email, null);
-    if (!existing) return { action: 'not_found', name: score.name };
-    await getTable().update(existing.id, fields);
-    await sleep(DELAY_MS);
-    return { action: 'updated', name: score.name };
-  } catch (err) {
-    return { action: 'error', name: score.name, error: err.message };
-  }
-}
+  // Build name→recordId map of what already exists
+  const existing = {};
+  await table.select({ fields: ['Name'] }).eachPage((records, next) => {
+    records.forEach(r => { existing[normKey(r.fields['Name'])] = r.id; });
+    next();
+  });
 
-export async function bulkWriteScores(scores, { onProgress } = {}) {
-  const totals = { updated: 0, notFound: 0, errors: [] };
-  for (let i = 0; i < scores.length; i++) {
-    const r = await writeScore(scores[i]);
-    if (r.action === 'updated')   totals.updated++;
-    else if (r.action === 'not_found') totals.notFound++;
-    else totals.errors.push(r);
-    if (onProgress) onProgress({ index: i + 1, total: scores.length, result: r });
-  }
-  return totals;
-}
+  const BATCH = 10;
+  for (let i = 0; i < profiles.length; i += BATCH) {
+    const batch    = profiles.slice(i, i + BATCH);
+    const toCreate = [];
+    const toUpdate = [];
 
-export async function loadAllContacts() {
-  const contacts = [];
-  await getTable()
-    .select({ fields: ['Name', 'Email', 'LinkedIn URL'] })
-    .eachPage((records, next) => {
-      for (const r of records) {
-        contacts.push({
-          name:         r.fields['Name']         || null,
-          email:        r.fields['Email']        || null,
-          linkedin_url: r.fields['LinkedIn URL'] || null,
+    for (const p of batch) {
+      const fields = {
+        'Name':           p.name          || '',
+        'Title':          p.title         || '',
+        'Company':        p.company       || '',
+        'Location':       p.location      || '',
+        'LinkedIn URL':   p.linkedinUrl   || '',
+        'Email':          p.email         || '',
+        'Connected Date': p.connectedDate || '',
+        'Source':         p.source        || 'CSV Import',
+        'Last Enriched':  new Date().toISOString().split('T')[0],
+      };
+      // Remove empty strings so Airtable date/URL fields don't error
+      Object.keys(fields).forEach(k => { if (fields[k] === '') delete fields[k]; });
+
+      const key = normKey(p.name);
+      if (existing[key]) {
+        toUpdate.push({ id: existing[key], fields });
+      } else {
+        toCreate.push({ fields });
+      }
+    }
+
+    try {
+      if (toCreate.length) {
+        const created = await table.create(toCreate);
+        result.created += created.length;
+        created.forEach(r => {
+          existing[normKey(r.fields['Name'])] = r.id;
+          if (onProgress) onProgress({
+            index:  result.created + result.updated,
+            total:  profiles.length,
+            result: { name: r.fields['Name'], action: 'created' },
+          });
         });
       }
-      next();
+      if (toUpdate.length) {
+        await table.update(toUpdate);
+        result.updated += toUpdate.length;
+        toUpdate.forEach(u => {
+          if (onProgress) onProgress({
+            index:  result.created + result.updated,
+            total:  profiles.length,
+            result: { name: u.fields['Name'] || '', action: 'updated' },
+          });
+        });
+      }
+    } catch (err) {
+      console.error('[airtable] upsert batch error:', err.message);
+      result.errors.push(err.message);
+      batch.forEach(p => {
+        if (onProgress) onProgress({
+          index:  result.created + result.updated + result.errors.length,
+          total:  profiles.length,
+          result: { name: p.name, action: 'error', error: err.message },
+        });
+      });
+    }
+  }
+
+  return result;
+}
+
+// ─── loadAllContacts ──────────────────────────────────────────────────────────
+// Called by server.js /api/score — MUST return .id on each contact
+export async function loadAllContacts() {
+  const table    = getTable();
+  const contacts = [];
+
+  await table.select({
+    fields: ['Name', 'Email', 'LinkedIn URL', 'Company', 'Title'],
+  }).eachPage((records, next) => {
+    records.forEach(r => {
+      contacts.push({
+        id:          r.id,                            // Airtable record ID — critical for bulkWriteScores
+        name:        r.fields['Name']         || '',
+        email:       r.fields['Email']        || '',
+        linkedinUrl: r.fields['LinkedIn URL'] || '',
+        company:     r.fields['Company']      || '',
+        title:       r.fields['Title']        || '',
+      });
     });
+    next();
+  });
+
+  console.log(`[airtable] loadAllContacts: ${contacts.length} records`);
   return contacts;
 }
 
-/**
- * Load contacts filtered by relationship status (for targeted LinkedIn enrichment)
- */
-export async function loadContactsByStatus(statuses = ['Hot', 'Warm']) {
-  const contacts = [];
-  const formula = `OR(${statuses.map(s => `{Relationship Status} = "${s}"`).join(', ')})`;
+// ─── bulkWriteScores ──────────────────────────────────────────────────────────
+// Called by server.js /api/score with (scores, { onProgress })
+// Writes directly by Airtable record ID — no fragile name lookup
+export async function bulkWriteScores(scores, { onProgress } = {}) {
+  const table  = getTable();
+  const result = { updated: 0, errors: [] };
 
-  await getTable()
-    .select({ fields: ['Name', 'Email', 'LinkedIn URL', 'Relationship Status'], filterByFormula: formula })
-    .eachPage((records, next) => {
-      for (const r of records) {
-        contacts.push({
-          name:         r.fields['Name']                  || null,
-          email:        r.fields['Email']                 || null,
-          linkedin_url: r.fields['LinkedIn URL']          || null,
-          status:       r.fields['Relationship Status']   || null,
-        });
+  const BATCH = 10;
+  for (let i = 0; i < scores.length; i += BATCH) {
+    const batch   = scores.slice(i, i + BATCH);
+    const updates = [];
+
+    for (const s of batch) {
+      if (!s.id) {
+        console.warn(`[airtable] bulkWriteScores: no record ID for "${s.name}" — skipping`);
+        continue;
       }
-      next();
+
+      const fields = {
+        'Relationship Score':        Math.round(s.compositeScore ?? s.score ?? 0),
+        'Relationship Status':       s.status || 'Dormant',
+        'Flag for Re-engagement':    s.flagForReengagement === true,
+        'Active Platforms':          (s.activePlatforms || []).join(', '),
+        'Gmail Thread Count':        s.gmail?.threadCount           ?? 0,
+        'WhatsApp Message Count':    s.whatsapp?.messageCount       ?? 0,
+        'LinkedIn Message Count':    s.linkedin?.messageCount       ?? 0,
+        'Twitter Interaction Count': s.twitter?.interactionCount    ?? 0,
+        'Days Since Contact':        s.daysSinceContact             ?? 999,
+      };
+
+      // Only set date fields when there's an actual value
+      if (s.lastContactDate)    fields['Last Contact Date']      = s.lastContactDate;
+      if (s.gmail?.lastDate)    fields['Gmail Last Email']        = s.gmail.lastDate;
+      if (s.whatsapp?.lastDate) fields['WhatsApp Last Message']   = s.whatsapp.lastDate;
+      if (s.linkedin?.lastDate) fields['LinkedIn Last Message']   = s.linkedin.lastDate;
+
+      updates.push({ id: s.id, fields });
+    }
+
+    try {
+      if (updates.length) {
+        await table.update(updates);
+        result.updated += updates.length;
+      }
+    } catch (err) {
+      console.error('[airtable] bulkWriteScores batch error:', err.message);
+      result.errors.push(err.message);
+    }
+
+    if (onProgress) {
+      onProgress({ index: Math.min(i + BATCH, scores.length), total: scores.length });
+    }
+  }
+
+  return result;
+}
+
+// ─── loadContactsByStatus ─────────────────────────────────────────────────────
+export async function loadContactsByStatus(statuses = ['Hot', 'Warm'], limit = 40) {
+  const table    = getTable();
+  const contacts = [];
+
+  const formula = statuses.length === 1
+    ? `{Relationship Status} = '${statuses[0]}'`
+    : `OR(${statuses.map(s => `{Relationship Status} = '${s}'`).join(', ')})`;
+
+  await table.select({ filterByFormula: formula, maxRecords: limit }).eachPage((records, next) => {
+    records.forEach(r => {
+      contacts.push({
+        id:          r.id,
+        name:        r.fields['Name']               || '',
+        email:       r.fields['Email']              || '',
+        linkedinUrl: r.fields['LinkedIn URL']       || '',
+        company:     r.fields['Company']            || '',
+        title:       r.fields['Title']              || '',
+        score:       r.fields['Relationship Score'] || 0,
+      });
     });
+    next();
+  });
+
+  return contacts;
+}
+
+// ─── getDormantContacts ───────────────────────────────────────────────────────
+export async function getDormantContacts(limit = 100) {
+  const table    = getTable();
+  const contacts = [];
+
+  await table.select({
+    filterByFormula: `OR({Flag for Re-engagement} = TRUE(), {Relationship Status} = 'Dormant')`,
+    sort:            [{ field: 'Days Since Contact', direction: 'desc' }],
+    maxRecords:      limit,
+    fields:          ['Name', 'Title', 'Company', 'Relationship Status', 'Days Since Contact', 'Last Contact Date', 'Relationship Score', 'LinkedIn URL'],
+  }).eachPage((records, next) => {
+    records.forEach(r => {
+      contacts.push({
+        name:             r.fields['Name']                || '',
+        company:          r.fields['Company']             || '',
+        title:            r.fields['Title']               || '',
+        status:           r.fields['Relationship Status'] || 'Unknown',
+        daysSinceContact: r.fields['Days Since Contact']  ?? 999,
+        lastContactDate:  r.fields['Last Contact Date']   || '',
+        score:            r.fields['Relationship Score']  || 0,
+        linkedinUrl:      r.fields['LinkedIn URL']        || '',
+      });
+    });
+    next();
+  });
 
   return contacts;
 }

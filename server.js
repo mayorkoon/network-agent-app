@@ -38,12 +38,14 @@ function sse(res) {
     error:    (message)                  => { send({ type: 'error', message }); res.end(); },
   };
 }
-// Add this near the top of server.js, before Gmail is used
+
+// Restore Gmail token from env var if present (for Render deployments)
 const TOKEN_PATH = path.join(process.cwd(), '.token-gmail.json');
 if (!fs.existsSync(TOKEN_PATH) && process.env.GMAIL_TOKEN_JSON) {
   fs.writeFileSync(TOKEN_PATH, process.env.GMAIL_TOKEN_JSON);
   console.log('✅ Gmail token restored from env');
 }
+
 // ─── Status ───────────────────────────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
   const tokenPath = path.join(process.cwd(), '.token-gmail.json');
@@ -74,11 +76,18 @@ app.get('/api/stats', async (req, res) => {
         for (const r of records) {
           total++;
           const s = r.fields['Relationship Status'];
-          if (s && breakdown[s] !== undefined) breakdown[s]++; else breakdown.Unscored++;
+          // FIXED: trim whitespace before matching to avoid silent Unscored bucketing
+          const normalized = s ? s.toString().trim() : null;
+          if      (normalized === 'Hot')     breakdown.Hot++;
+          else if (normalized === 'Warm')    breakdown.Warm++;
+          else if (normalized === 'Cold')    breakdown.Cold++;
+          else if (normalized === 'Dormant') breakdown.Dormant++;
+          else                               breakdown.Unscored++;
           if (r.fields['Flag for Re-engagement']) flagged++;
         }
         next();
       });
+    console.log(`[stats] total=${total} hot=${breakdown.Hot} warm=${breakdown.Warm} cold=${breakdown.Cold} dormant=${breakdown.Dormant} unscored=${breakdown.Unscored} flagged=${flagged}`);
     res.json({ total, breakdown, flagged });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -229,9 +238,9 @@ app.post('/api/enrich', async (req, res) => {
       limit,
       onProgress: ({ index, total, contact, result }) => {
         stream.progress(index, total, contact.name);
-        if (result.error)         stream.log(`  ⚠️  ${contact.name}: ${result.error}`, 'warn');
-        else if (result.messageCount > 0) stream.log(`  💬 ${contact.name}: ${result.messageCount} msgs, ${result.daysSince??'?'}d ago`, 'success');
-        else                              stream.log(`  ○  ${contact.name}: no messages`);
+        if (result.error)                   stream.log(`  ⚠️  ${contact.name}: ${result.error}`, 'warn');
+        else if (result.messageCount > 0)   stream.log(`  💬 ${contact.name}: ${result.messageCount} msgs, ${result.daysSince??'?'}d ago`, 'success');
+        else                                stream.log(`  ○  ${contact.name}: no messages`);
       },
     });
 
@@ -379,7 +388,7 @@ td.ts span{padding:2px 8px;border-radius:8px;font-size:10px;font-family:var(--mo
 <header>
   <div class="brand">
     <h1>Network Intelligence</h1>
-    <p>// linkedin relationship scoring agent  v3.0</p>
+    <p>linkedin relationship scoring agent  v3.0</p>
   </div>
   <div class="pills">
     <div class="pill"><div class="dot" id="d-airtable"></div>Airtable</div>
@@ -577,7 +586,6 @@ async function doImport(){
       bn('import','✓ '+ev.created+' created  '+ev.updated+' updated  '+ev.skipped+' skipped');
     });
   }catch(e){lg('Import failed: '+e.message,'error');bn('import','✗ '+e.message,'er');}
-  // Always refresh stats after import — regardless of SSE done event
   await refreshStats();
   btn.disabled=false;btn.textContent='Import CSV';
 }
@@ -585,7 +593,6 @@ async function doScore(){
   const btn=document.getElementById('scoreBtn');
   btn.disabled=true;btn.innerHTML='<span class="spin"></span> Scoring...';
   lg('📊 Starting network score...');
-  // Poll stats every 8 seconds while scoring runs so cards update live
   const pollInterval=setInterval(()=>refreshStats(),8000);
   try{
     await runSSE('/api/score',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rebuild})},'score',ev=>{
@@ -594,7 +601,6 @@ async function doScore(){
     });
   }catch(e){lg('Scoring failed: '+e.message,'error');bn('score','✗ '+e.message,'er');}
   clearInterval(pollInterval);
-  // Always refresh stats + status after scoring — regardless of SSE done event
   await refreshStats();
   await loadStatus();
   btn.disabled=false;btn.textContent='Score All';
@@ -608,7 +614,6 @@ async function doEnrich(){
       bn('enrich','✓ '+ev.enriched+'/'+ev.total+' contacts had LinkedIn messages');
     });
   }catch(e){lg('Enrichment failed: '+e.message,'error');bn('enrich','✗ '+e.message,'er');}
-  // Always refresh stats after enrichment
   await refreshStats();
   btn.disabled=false;btn.textContent='Enrich LinkedIn';
 }
