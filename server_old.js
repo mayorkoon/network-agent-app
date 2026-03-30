@@ -39,6 +39,13 @@ function sse(res) {
   };
 }
 
+// Add this near the top of server.js, before Gmail is used
+const TOKEN_PATH = path.join(process.cwd(), '.token-gmail.json');
+if (!fs.existsSync(TOKEN_PATH) && process.env.GMAIL_TOKEN_JSON) {
+  fs.writeFileSync(TOKEN_PATH, process.env.GMAIL_TOKEN_JSON);
+  console.log('✅ Gmail token restored from env');
+}
+
 // ─── Status ───────────────────────────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
   const tokenPath = path.join(process.cwd(), '.token-gmail.json');
@@ -241,7 +248,8 @@ app.get('/oauth/start', async (req, res) => {
   if (!process.env.GMAIL_CLIENT_ID) return res.status(400).send('Set GMAIL_CLIENT_ID in .env first');
   try {
     const { google } = await import('googleapis');
-    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    //const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, process.env.GMAIL_REDIRECT_URI);
     res.redirect(auth.generateAuthUrl({ access_type: 'offline', scope: ['https://www.googleapis.com/auth/gmail.readonly'], prompt: 'consent' }));
   } catch (err) { res.status(500).send(err.message); }
 });
@@ -252,7 +260,8 @@ app.get('/oauth/callback', async (req, res) => {
   if (!code)  return res.status(400).send('No code received');
   try {
     const { google } = await import('googleapis');
-    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    //const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, `http://localhost:${PORT}/oauth/callback`);
+    const auth = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, process.env.GMAIL_REDIRECT_URI);
     const { tokens } = await auth.getToken(code);
     fs.writeFileSync(path.join(process.cwd(), '.token-gmail.json'), JSON.stringify(tokens, null, 2));
     res.send(`<html><body style="font-family:monospace;background:#07080d;color:#22d3a3;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">✅</div><div style="font-size:18px">Gmail authorized. Close this tab.</div><script>setTimeout(()=>window.close(),2000)<\/script></div></body></html>`);
@@ -570,28 +579,22 @@ async function doImport(){
   try{
     await runSSE('/api/import',{method:'POST',body:fd},'import',ev=>{
       bn('import','✓ '+ev.created+' created  '+ev.updated+' updated  '+ev.skipped+' skipped');
+      refreshStats();
     });
   }catch(e){lg('Import failed: '+e.message,'error');bn('import','✗ '+e.message,'er');}
-  // Always refresh stats after import — regardless of SSE done event
-  await refreshStats();
   btn.disabled=false;btn.textContent='Import CSV';
 }
 async function doScore(){
   const btn=document.getElementById('scoreBtn');
   btn.disabled=true;btn.innerHTML='<span class="spin"></span> Scoring...';
   lg('📊 Starting network score...');
-  // Poll stats every 8 seconds while scoring runs so cards update live
-  const pollInterval=setInterval(()=>refreshStats(),8000);
   try{
     await runSSE('/api/score',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rebuild})},'score',ev=>{
       const bd=ev.breakdown||{};
       bn('score','✓ 🔥'+(bd.Hot||0)+'  ☀️'+(bd.Warm||0)+'  ❄️'+(bd.Cold||0)+'  💤'+(bd.Dormant||0)+'  🚩'+ev.flagged+' flagged');
+      refreshStats();loadStatus();
     });
   }catch(e){lg('Scoring failed: '+e.message,'error');bn('score','✗ '+e.message,'er');}
-  clearInterval(pollInterval);
-  // Always refresh stats + status after scoring — regardless of SSE done event
-  await refreshStats();
-  await loadStatus();
   btn.disabled=false;btn.textContent='Score All';
 }
 async function doEnrich(){
@@ -603,8 +606,6 @@ async function doEnrich(){
       bn('enrich','✓ '+ev.enriched+'/'+ev.total+' contacts had LinkedIn messages');
     });
   }catch(e){lg('Enrichment failed: '+e.message,'error');bn('enrich','✗ '+e.message,'er');}
-  // Always refresh stats after enrichment
-  await refreshStats();
   btn.disabled=false;btn.textContent='Enrich LinkedIn';
 }
 async function loadDormant(){
