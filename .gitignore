@@ -18,3 +18,5 @@ build/
 
 .gmail-index.json
 .token-index.json
+.token-gmail.json
+.token-gmail.json

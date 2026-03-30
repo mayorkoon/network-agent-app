@@ -1,12 +1,16 @@
 /**
  * csv-parser.js
- * Parses LinkedIn's official Connections CSV export.
+ * Parses two CSV formats:
  *
- * To export: LinkedIn → Settings → Data Privacy → Get a copy of your data
- *            → Connections → Request archive → download connections.csv
+ * FORMAT A — Custom export (your format):
+ *   Name, Location, Title, LinkedIn URL, Email, Company,
+ *   Connected Date, Source, Last Enriched, Relationship Status
  *
- * LinkedIn CSV columns:
- *   First Name, Last Name, URL, Email Address, Company, Position, Connected On
+ * FORMAT B — LinkedIn official export:
+ *   First Name, Last Name, URL, Email Address, Company,
+ *   Position, Connected On
+ *
+ * Auto-detects which format based on headers.
  */
 
 import fs from 'fs';
@@ -16,10 +20,16 @@ export function parseLinkedInCSV(csvPath) {
   const content = fs.readFileSync(csvPath, 'utf-8');
   const lines = content.split('\n');
 
-  // LinkedIn adds 2–3 junk header lines before the real column headers
+  // Find the real header row — skip any junk lines at top
   let headerIndex = 0;
   for (let i = 0; i < Math.min(lines.length, 6); i++) {
-    if (lines[i].includes('First Name') || lines[i].includes('Last Name')) {
+    const line = lines[i];
+    if (
+      line.includes('First Name') ||
+      line.includes('Last Name')  ||
+      line.includes('Name')       ||
+      line.includes('LinkedIn URL')
+    ) {
       headerIndex = i;
       break;
     }
@@ -32,30 +42,61 @@ export function parseLinkedInCSV(csvPath) {
     relax_column_count: true,
   });
 
+  if (!records.length) return [];
+
+  // Detect format by checking first record's keys
+  const keys = Object.keys(records[0]);
+  const isLinkedInOfficial = keys.includes('First Name') || keys.includes('Last Name');
+
   return records
     .map(row => {
-      const firstName = row['First Name'] || '';
-      const lastName  = row['Last Name']  || '';
-      const name = [firstName, lastName].filter(Boolean).join(' ').trim();
+      let name, title, company, email, linkedin_url, connected_date;
 
-      const connectedOn = row['Connected On'] || '';
-      let connectedDate = null;
-      try {
-        const d = new Date(connectedOn);
-        if (!isNaN(d)) connectedDate = d.toISOString().split('T')[0];
-      } catch {}
+      if (isLinkedInOfficial) {
+        // FORMAT B — LinkedIn official export
+        const firstName = row['First Name'] || '';
+        const lastName  = row['Last Name']  || '';
+        name         = [firstName, lastName].filter(Boolean).join(' ').trim() || null;
+        title        = row['Position']      || row['Title']        || null;
+        company      = row['Company']       || null;
+        email        = row['Email Address'] || row['Email']        || null;
+        linkedin_url = row['URL']           || row['LinkedIn URL'] || null;
+
+        const raw = row['Connected On'] || row['Connected Date'] || '';
+        connected_date = parseDate(raw);
+
+      } else {
+        // FORMAT A — your custom format
+        name         = row['Name']         || row['Full Name']    || null;
+        title        = row['Title']        || row['Position']     || null;
+        company      = row['Company']      || null;
+        email        = row['Email']        || row['Email Address']|| null;
+        linkedin_url = row['LinkedIn URL'] || row['URL']          || null;
+
+        const raw = row['Connected Date'] || row['Connected On'] || '';
+        connected_date = parseDate(raw);
+      }
 
       return {
-        name:           name || null,
-        title:          row['Position']      || null,
-        company:        row['Company']       || null,
-        email:          row['Email Address'] || null,
-        linkedin_url:   row['URL']           || null,
-        connected_date: connectedDate,
-        _source: 'CSV',
+        name:           name?.trim() || null,
+        title:          title?.trim() || null,
+        company:        company?.trim() || null,
+        email:          email?.trim() || null,
+        linkedin_url:   linkedin_url?.trim() || null,
+        connected_date,
+        _source:        row['Source'] || 'CSV',
       };
     })
     .filter(r => r.name);
+}
+
+function parseDate(raw) {
+  if (!raw || !raw.trim()) return null;
+  try {
+    const d = new Date(raw.trim());
+    if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+  } catch {}
+  return null;
 }
 
 export function deduplicateProfiles(profiles) {
@@ -66,7 +107,6 @@ export function deduplicateProfiles(profiles) {
     if (!seen.has(key)) {
       seen.set(key, p);
     } else {
-      // Merge — keep richest version of each field
       const existing = seen.get(key);
       for (const [k, v] of Object.entries(p)) {
         if (!existing[k] && v) existing[k] = v;
