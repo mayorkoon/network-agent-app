@@ -38,7 +38,12 @@ function sse(res) {
     error:    (message)                  => { send({ type: 'error', message }); res.end(); },
   };
 }
-
+// Add this near the top of server.js, before Gmail is used
+const TOKEN_PATH = path.join(process.cwd(), '.token-gmail.json');
+if (!fs.existsSync(TOKEN_PATH) && process.env.GMAIL_TOKEN_JSON) {
+  fs.writeFileSync(TOKEN_PATH, process.env.GMAIL_TOKEN_JSON);
+  console.log('✅ Gmail token restored from env');
+}
 // ─── Status ───────────────────────────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
   const tokenPath = path.join(process.cwd(), '.token-gmail.json');
